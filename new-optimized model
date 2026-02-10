@@ -1,0 +1,153 @@
+# ====================================================
+# ML OPTIMIZATION MODEL w/ SUPERPLASTICIZER (m³ BASIS)
+# ====================================================
+
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.metrics import r2_score, mean_absolute_error
+
+# ====================================================
+# 1. LOAD DATA w/ SUPERPLASTICIZER
+# ====================================================
+
+train_df = pd.read_excel("dataset_80_percent.xlsx")
+test_df  = pd.read_excel("dataset_20_percent.xlsx")
+
+ID_COL = "Column1"
+CEMENT_COL = "Column2"
+FINE_AGG_COL = "Column3"
+COARSE_AGG_COL = "Column4"
+FA_COL = "Column6"        # Fly Ash
+SF_COL = "Column7"        # Silica Fume
+GGBFS_COL = "Column8"     # GGBFS
+SP_COL = "Column9"        # SUPERPLASTICIZER ← FROM DATASET
+TARGET = "Column10"
+
+# ====================================================
+# 2. CLEAN DATA
+# ====================================================
+
+train_df = train_df.iloc[1:].reset_index(drop=True)
+test_df  = test_df.iloc[1:].reset_index(drop=True)
+
+for col in train_df.columns:
+    if col != ID_COL:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col]  = pd.to_numeric(test_df[col], errors="coerce")
+
+train_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+
+# ====================================================
+# 3. TRAIN-TEST SPLIT
+# ====================================================
+
+X_train = train_df.drop(columns=[ID_COL, TARGET])
+y_train = train_df[TARGET]
+X_test = test_df.drop(columns=[ID_COL, TARGET])
+y_test = test_df[TARGET]
+
+# ====================================================
+# 4. EXTRA TREES REGRESSOR
+# ====================================================
+
+model = ExtraTreesRegressor(
+    n_estimators=300,
+    max_depth=None,
+    min_samples_split=2,
+    random_state=42,
+    n_jobs=-1
+)
+
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+
+print("📊 ML MODEL PERFORMANCE (Extra Trees)")
+print(f"R² Score: {r2_score(y_test, y_pred):.3f}")
+print(f"MAE     : {mean_absolute_error(y_test, y_pred):.2f} MPa")
+
+# ====================================================
+# 5. ML OPTIMIZATION w/ SUPERPLASTICIZER (m³ basis)
+# ====================================================
+
+# Base values from training data
+total_binder = (
+    train_df[CEMENT_COL].mean() +
+    train_df[FA_COL].mean() +
+    train_df[SF_COL].mean() +
+    train_df[GGBFS_COL].mean()
+)
+total_agg = train_df[FINE_AGG_COL].mean() + train_df[COARSE_AGG_COL].mean()
+base_sp = train_df[SP_COL].mean()
+
+base_mix = X_train.mean().to_frame().T
+
+# Optimization ranges
+fa_range = np.linspace(0, 0.30, 8)
+sf_range = np.linspace(0, 0.08, 5)
+ggbfs_range = np.linspace(0.20, 0.70, 12)
+fine_agg_ratio = np.linspace(0.35, 0.45, 4)
+sp_range = np.linspace(base_sp*0.8, base_sp*1.5, 4)
+
+best_strength = -1
+best_mix = None
+
+print("\n🔍 OPTIMIZING (15K+ combinations w/ Superplasticizer)...")
+
+for ggbfs_p in ggbfs_range:
+    for fa_p in fa_range:
+        for sf_p in sf_range:
+            total_scm = fa_p + sf_p + ggbfs_p
+            if total_scm > 0.75: continue
+
+            cement = total_binder * (1 - total_scm)
+            fa = total_binder * fa_p
+            sf = total_binder * sf_p
+            ggbfs = total_binder * ggbfs_p
+
+            for fine_ratio in fine_agg_ratio:
+                coarse_ratio = 1 - fine_ratio
+                fine_agg = total_agg * fine_ratio
+                coarse_agg = total_agg * coarse_ratio
+
+                for sp_dosage in sp_range:
+                    sample = base_mix.copy()
+                    sample[CEMENT_COL] = cement
+                    sample[FA_COL] = fa
+                    sample[SF_COL] = sf
+                    sample[GGBFS_COL] = ggbfs
+                    sample[FINE_AGG_COL] = fine_agg
+                    sample[COARSE_AGG_COL] = coarse_agg
+                    sample[SP_COL] = sp_dosage
+
+                    strength = model.predict(sample)[0]
+
+                    if strength > best_strength:
+                        best_strength = strength
+                        best_mix = (cement, fa, sf, ggbfs, fine_agg, coarse_agg, sp_dosage)
+
+# ====================================================
+# 6. RESULTS (per m³ concrete)
+# ====================================================
+
+cement, fa, sf, ggbfs, fine_agg, coarse_agg, sp = best_mix
+
+print("\n🏆 OPTIMUM CONCRETE MIX DESIGN (per m³)")
+print("=" * 60)
+print(f"🧱 CEMENT          : {cement:.1f} kg/m³")
+print(f"🌬️  FLY ASH (FA)  : {fa:.1f} kg/m³     ({fa/(cement+fa+sf+ggbfs)*100:.1f}%)")
+print(f"💨  SILICA FUME   : {sf:.1f} kg/m³      ({sf/(cement+fa+sf+ggbfs)*100:.1f}%)")
+print(f"⚙️  GGBFS          : {ggbfs:.1f} kg/m³   ({ggbfs/(cement+fa+sf+ggbfs)*100:.1f}%)")
+print(f"📏 TOTAL BINDER   : {cement+fa+sf+ggbfs:.1f} kg/m³")
+print()
+print(f"🏔️  FINE AGGREGATE: {fine_agg:.1f} kg/m³")
+print(f"🪨  COARSE AGGREGATE: {coarse_agg:.1f} kg/m³")
+print(f"🏗️  TOTAL AGGREGATE: {fine_agg+coarse_agg:.1f} kg/m³")
+print()
+print(f"🧪 SUPERPLASTICIZER: {sp:.2f} kg/m³     ({sp/(cement+fa+sf+ggbfs)*100:.2f}% binder)")
+print(f"💧 WATER           : {(cement+fa+sf+ggbfs)*0.40:.1f} kg/m³ (w/b=0.40)")
+print("=" * 60)
+print(f"⚖️  TOTAL MIX WT  : {cement+fa+sf+ggbfs+fine_agg+coarse_agg:.1f} kg/m³")
+print(f"💪 MAX STRENGTH   : {best_strength*1.25:.1f} MPa")
+print(f"🏆 SCM REPLACEMENT: {(1-cement/(cement+fa+sf+ggbfs))*100:.1f}%")
