@@ -1,0 +1,247 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import random
+from sklearn.ensemble import ExtraTreesRegressor
+import plotly.express as px
+
+# =====================================================
+# LOAD DATA AND TRAIN MODEL
+# =====================================================
+
+@st.cache_resource
+def load_model():
+
+    df = pd.read_excel("dataset_80_percent.xlsx").iloc[1:].reset_index(drop=True)
+
+    ID_COL = "Column1"
+    TARGET = "Column10"
+
+    features = [
+        "Column2", # Cement
+        "Column3", # Fine agg
+        "Column4", # Coarse agg
+        "Column6", # Fly ash
+        "Column7", # Silica fume
+        "Column8", # GGBFS
+        "Column9"  # Superplasticizer
+    ]
+
+    for c in df.columns:
+        if c != ID_COL:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df.dropna(inplace=True)
+
+    X = df[features]
+    y = df[TARGET]
+
+    model = ExtraTreesRegressor(
+        n_estimators=200,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    model.fit(X,y)
+
+    return model, df, features
+
+
+model, base_df, features = load_model()
+
+# =====================================================
+# BASE VALUES
+# =====================================================
+
+total_binder = base_df[['Column2','Column6','Column7','Column8']].sum(axis=1).mean()
+total_agg = base_df[['Column3','Column4']].sum(axis=1).mean()
+base_sp = base_df['Column9'].mean()
+
+# =====================================================
+# STREAMLIT UI
+# =====================================================
+
+st.title("🏗 AI Sustainable Concrete Mix Optimizer (Genetic Algorithm)")
+
+st.sidebar.header("Material Rates (₹/kg)")
+
+costs = {
+"cement": st.sidebar.number_input("Cement", value=8.0),
+"fa": st.sidebar.number_input("Fly Ash", value=2.0),
+"sf": st.sidebar.number_input("Silica Fume", value=25.0),
+"ggbfs": st.sidebar.number_input("GGBFS", value=3.5),
+"fine": st.sidebar.number_input("Fine Aggregate", value=1.2),
+"coarse": st.sidebar.number_input("Coarse Aggregate", value=1.5),
+"sp": st.sidebar.number_input("Superplasticizer", value=60.0)
+}
+
+target_strength = st.sidebar.slider("Target Strength (MPa)",30,60,50)
+
+# =====================================================
+# GENETIC ALGORITHM FUNCTIONS
+# =====================================================
+
+POP_SIZE = 40
+GENERATIONS = 40
+MUTATION_RATE = 0.1
+
+def random_mix():
+
+    scm_ratio = random.uniform(0.2,0.7)
+
+    cement = total_binder*(1-scm_ratio)
+    fa = total_binder*random.uniform(0,0.3)
+    sf = total_binder*random.uniform(0,0.15)
+    ggbfs = total_binder*(scm_ratio-fa/total_binder-sf/total_binder)
+
+    fine_ratio = random.uniform(0.35,0.45)
+
+    fine = total_agg*fine_ratio
+    coarse = total_agg*(1-fine_ratio)
+
+    sp = random.uniform(base_sp*0.8,base_sp*1.4)
+
+    return [cement,fine,coarse,fa,sf,ggbfs,sp]
+
+def evaluate(mix):
+
+    sample = pd.DataFrame([mix],columns=features)
+
+    strength = model.predict(sample)[0]
+
+    cement,fine,coarse,fa,sf,ggbfs,sp = mix
+
+    cost = (
+        cement*costs["cement"]+
+        fa*costs["fa"]+
+        sf*costs["sf"]+
+        ggbfs*costs["ggbfs"]+
+        fine*costs["fine"]+
+        coarse*costs["coarse"]+
+        sp*costs["sp"]
+    )
+
+    co2 = (
+        cement*0.9+
+        fa*0.02+
+        sf*0.1+
+        ggbfs*0.07+
+        fine*0.005+
+        coarse*0.005+
+        sp*0.2
+    )
+
+    penalty = max(0,target_strength-strength)*50
+
+    fitness = strength*10 - cost*0.1 - co2*0.5 - penalty
+
+    return fitness,strength,cost,co2
+
+
+def crossover(p1,p2):
+
+    child = []
+
+    for i in range(len(p1)):
+
+        if random.random()<0.5:
+            child.append(p1[i])
+        else:
+            child.append(p2[i])
+
+    return child
+
+
+def mutate(mix):
+
+    if random.random()<MUTATION_RATE:
+
+        idx = random.randint(0,len(mix)-1)
+        mix[idx] *= random.uniform(0.9,1.1)
+
+    return mix
+
+# =====================================================
+# GA OPTIMIZATION
+# =====================================================
+
+def run_ga():
+
+    population = [random_mix() for _ in range(POP_SIZE)]
+
+    best_mix = None
+    best_fit = -9999
+    history = []
+
+    for g in range(GENERATIONS):
+
+        scored = []
+
+        for mix in population:
+
+            fit,strength,cost,co2 = evaluate(mix)
+
+            scored.append((fit,mix,strength,cost,co2))
+
+            if fit>best_fit:
+
+                best_fit = fit
+                best_mix = (mix,strength,cost,co2)
+
+        scored.sort(reverse=True,key=lambda x:x[0])
+
+        population = [s[1] for s in scored[:POP_SIZE//2]]
+
+        children=[]
+
+        while len(children)<POP_SIZE:
+
+            p1=random.choice(population)
+            p2=random.choice(population)
+
+            child=crossover(p1,p2)
+            child=mutate(child)
+
+            children.append(child)
+
+        population=children
+
+        history.append(best_mix[1])
+
+    return best_mix,history
+
+
+# =====================================================
+# RUN BUTTON
+# =====================================================
+
+if st.button("Optimize Mix (Genetic Algorithm)"):
+
+    with st.spinner("Running AI optimizer..."):
+
+        best,history = run_ga()
+
+    mix,strength,cost,co2 = best
+
+    cement,fine,coarse,fa,sf,ggbfs,sp = mix
+
+    st.subheader("🏆 Optimized Mix")
+
+    st.write(f"Cement: {cement:.1f} kg")
+    st.write(f"Fly Ash: {fa:.1f} kg")
+    st.write(f"Silica Fume: {sf:.1f} kg")
+    st.write(f"GGBFS: {ggbfs:.1f} kg")
+    st.write(f"Fine Aggregate: {fine:.1f} kg")
+    st.write(f"Coarse Aggregate: {coarse:.1f} kg")
+    st.write(f"Superplasticizer: {sp:.2f} kg")
+
+    st.subheader("Performance")
+
+    st.metric("Predicted Strength",f"{strength:.2f} MPa")
+    st.metric("Cost",f"₹{cost:.0f}/m³")
+    st.metric("CO₂",f"{co2:.1f} kg")
+
+    fig = px.line(history,title="Optimization Progress",labels={"value":"Strength","index":"Generation"})
+    st.plotly_chart(fig,use_container_width=True)
+
+st.caption("AI Sustainable Concrete Optimizer using Genetic Algorithm")
